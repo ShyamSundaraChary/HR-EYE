@@ -4,4 +4,4 @@ numpy
 xgboost
 scikit-learn
 google-generativeai
-dotenv
+python-dotenv

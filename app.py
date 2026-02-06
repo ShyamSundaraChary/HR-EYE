@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import joblib
 from google import genai
+import time
+import random
+from google.genai import errors as genai_errors
 import os
 import dotenv
 
@@ -16,6 +19,31 @@ def load_gemini_client():
     return genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 gemini_client = load_gemini_client()
+
+
+def _safe_generate_content(prompt: str, model: str = "gemini-3-flash-preview", max_retries: int = 5):
+    """Call Gemini with exponential backoff and jitter on ServerError (503).
+
+    Returns the response object on success or raises the last exception on final failure.
+    """
+    base_delay = 1.0
+    for attempt in range(1, max_retries + 1):
+        try:
+            return gemini_client.models.generate_content(
+                model=model,
+                contents=prompt,
+            )
+        except genai_errors.ServerError as e:
+            # Model overloaded / 503 — retry with exponential backoff + jitter
+            if attempt == max_retries:
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            # add some jitter so retries across clients don't synchronize
+            delay = delay * (0.8 + random.random() * 0.4)
+            time.sleep(delay)
+        except Exception:
+            # For other errors, re-raise immediately
+            raise
 
 
 # -----------------------------
@@ -398,7 +426,16 @@ def generate_hr_reasoning(df, pred):
         if pred == 1
         else "likely to stay with the organization"
     )
-
+    # we need make it back original scale for the explanation to be meaningful to HR managers, so we reverse the transformations we applied to the input features before prediction.
+        # "DailyRate": DailyRate/5,
+        # "HourlyRate": HourlyRate/3,
+        # "MonthlyIncome": MonthlyIncome/10,
+    
+    df = df.copy()
+    df['DailyRate'] = df['DailyRate'] * 5
+    df['HourlyRate'] = df['HourlyRate'] * 3
+    df['MonthlyIncome'] = df['MonthlyIncome'] * 10
+    
     prompt = f"""
         You are an HR analytics assistant.
 
@@ -416,12 +453,19 @@ def generate_hr_reasoning(df, pred):
         - Make the explanation actionable for HR
         """
 
-    response = gemini_client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=prompt
-    )
-
-    return response.text
+    try:
+        response = _safe_generate_content(prompt)
+        if response and hasattr(response, 'text'):
+            return response.text
+        return "Unable to generate explanation from the response."
+    except genai_errors.ServerError:
+        # Friendly fallback for overloaded model
+        return (
+            "The explanation service is temporarily unavailable (503). "
+            "Please try again in a few moments."
+        )
+    except Exception:
+        return "Failed to generate explanation due to an unexpected error."
 
 # -----------------------------
 # Prediction
@@ -507,83 +551,3 @@ if st.session_state.get('prediction_done'):
         st.markdown(st.session_state['last_explanation'])
     else:
         st.info("Click '🧠 Generate HR Explanation' to get actionable reasons.")
-
-# -----------------------------
-# Sample Employee Profiles
-# -----------------------------
-# st.divider()
-# st.subheader("📌 Key Attrition Risk Patterns")
-# st.caption("Use the '📥 Load Sample' button above to test these profiles in the prediction form.")
-
-# col_yes, col_no = st.columns(2)
-
-# with col_yes:
-#     st.markdown("### 🔴 High Attrition Risk Profile")
-#     st.markdown("""
-# - **Job Level:** Entry / Junior  
-# - **Monthly Income:** Low (₹15,000 - ₹30,000)
-# - **Years at Company:** 0–2 years  
-# - **Total Experience:** Low (0-3 years)
-# - **Business Travel:** Frequent  
-# - **Department:** Sales / Human Resources
-# - **Job Role:** Lab Technician / Sales Rep
-# - **Marital Status:** Single  
-# - **Overtime:** Yes ⚠️
-# - **Work-Life Balance:** Poor
-# """)
-
-# with col_no:
-#     st.markdown("### 🟢 Low Attrition Risk Profile")
-#     st.markdown("""
-# - **Job Level:** Mid to Senior  
-# - **Monthly Income:** Competitive (₹80,000+)
-# - **Years at Company:** 5+ years  
-# - **Total Experience:** High (10+ years)
-# - **Business Travel:** Rare or None  
-# - **Department:** Research & Development
-# - **Job Role:** Manager / Research Scientist
-# - **Marital Status:** Married  
-# - **Overtime:** No ✅
-# - **Work-Life Balance:** Excellent
-# """)
-
-# # -----------------------------
-# # Model Insights & Final Findings
-# # -----------------------------
-# st.divider()
-# st.subheader("🎯 Model Insights & Key Findings")
-
-# st.markdown("""
-# Based on exploratory data analysis and XGBoost model results, the following key insights were identified:
-
-# #### 🔹 Experience & Compensation
-# Employees with **lower job levels**, **lower monthly income**, **fewer years at the company**, and **lower total working experience** show a significantly higher likelihood of attrition. Competitive compensation and career progression play a critical role in employee retention.
-
-# #### 🔹 Business Travel
-# Employees who **travel frequently** for work are more likely to leave compared to those with rare or no travel, indicating possible burnout or work-life imbalance.
-
-# #### 🔹 Department
-# Employees in **Research & Development** demonstrate higher retention rates compared to other departments such as Sales and Human Resources.
-
-# #### 🔹 Education Field
-# Employees with **Human Resources** and **Technical Degree** backgrounds show higher attrition compared to other education fields.
-
-# #### 🔹 Gender
-# **Male employees** exhibit a higher probability of attrition compared to female employees in the dataset.
-
-# #### 🔹 Job Role
-# Attrition is notably higher among **Laboratory Technicians**, **Sales Representatives**, and **Human Resources** roles, suggesting role-specific stress or limited growth opportunities.
-
-# #### 🔹 Marital Status
-# Employees who are **Single** are more likely to leave than those who are Married or Divorced.
-
-# #### 🔹 Overtime
-# Employees who frequently **work overtime** have a higher likelihood of attrition, highlighting workload and work-life balance as major contributing factors.
-
-# ---
-
-# #### 📊 Overall Conclusion
-# Employee attrition is strongly influenced by a combination of **compensation**, **career growth**, **workload**, **role stability**, and **personal life factors**. Addressing these areas proactively can significantly improve employee retention and engagement.
-
-# *This tool is designed to support HR decision-making by combining predictive modeling with explainable, human-readable insights.*
-# """)
