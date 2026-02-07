@@ -7,6 +7,8 @@ import random
 from google.genai import errors as genai_errors
 import os
 import dotenv
+import shap
+import matplotlib.pyplot as plt
 
 # Load environment variables
 dotenv.load_dotenv()
@@ -59,6 +61,23 @@ def load_columns():
 
 model = load_model()
 TRAIN_COLS = load_columns()
+
+
+@st.cache_resource
+def load_shap_explainer():
+    try:
+        return shap.Explainer(model)
+    except Exception:
+        return shap.TreeExplainer(model)
+
+
+def encode_for_model(raw_df):
+    encoded = pd.get_dummies(raw_df, drop_first=True)
+    missing = [col for col in TRAIN_COLS if col not in encoded.columns]
+    if missing:
+        zeros = pd.DataFrame(0, index=encoded.index, columns=missing)
+        encoded = pd.concat([encoded, zeros], axis=1)
+    return encoded[TRAIN_COLS].copy()
 
 st.set_page_config(page_title="Employee Attrition Predictor", layout="wide")
 st.title("🔮 Employee Attrition Prediction")
@@ -551,3 +570,36 @@ if st.session_state.get('prediction_done'):
         st.markdown(st.session_state['last_explanation'])
     else:
         st.info("Click '🧠 Generate HR Explanation' to get actionable reasons.")
+
+    st.divider()
+    st.subheader("🔬 SHAP Model Explanation")
+    st.caption("Model-level feature importance and per-employee explanations using SHAP")
+
+    if st.button("🔎 Generate SHAP Explanation"):
+        with st.spinner("Computing SHAP values..."):
+            try:
+                raw = st.session_state.get('last_raw_df')
+                if raw is None:
+                    st.error("No prediction input found to explain.")
+                else:
+                    encoded_for_shap = encode_for_model(raw)
+                    explainer = load_shap_explainer()
+                    shap_vals = explainer(encoded_for_shap)
+
+                    # Bar plot (global / per-sample importance)
+                    fig1 = plt.figure(figsize=(8, 4))
+                    try:
+                        shap.plots.bar(shap_vals[0], max_display=15, show=False)
+                    except Exception:
+                        shap.plots.bar(shap_vals, max_display=15, show=False)
+                    st.pyplot(fig1)
+
+                    # Waterfall (detailed per-sample)
+                    fig2 = plt.figure(figsize=(8, 6))
+                    try:
+                        shap.plots.waterfall(shap_vals[0], show=False)
+                    except Exception:
+                        shap.plots.waterfall(shap_vals, show=False)
+                    st.pyplot(fig2)
+            except Exception as e:
+                st.error(f"Failed to compute SHAP explanation: {e}")
