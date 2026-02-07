@@ -5,3 +5,5 @@ xgboost
 scikit-learn
 google-generativeai
 python-dotenv
+shap
+matplotlib
